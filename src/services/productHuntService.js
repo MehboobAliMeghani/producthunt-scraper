@@ -14,12 +14,35 @@ const {
   PRODUCT_HUNT_API_TOKEN,
   PRODUCT_HUNT_GRAPHQL_URL,
   PRODUCT_HUNT_MAX_PAGES,
+  PRODUCT_HUNT_PAGE_DELAY_MS,
 } = require('../config/env');
 
 // --- Tuning knobs for retry behavior -------------------------------------
 const MAX_RETRIES = 5;
 const BASE_BACKOFF_MS = 500; // doubles each retry: 500, 1000, 2000, 4000, 8000
 const PAGE_SIZE = 50; // PH caps `first` around 50 per page for posts
+
+// PH documents a 15-minute rate limit window. If a 429 response doesn't
+// carry a parseable `reset_in`, assume the full window needs to elapse
+// rather than guessing something shorter and immediately re-hitting the
+// limit.
+const RATE_LIMIT_FALLBACK_RESET_SECONDS = 15 * 60;
+// Extra cushion added on top of PH's own reported reset time, so we don't
+// resume a split-second before the window actually rolls over.
+const RATE_LIMIT_WAIT_BUFFER_SECONDS = 5;
+
+/**
+ * Thrown by graphqlRequest when a 429 persists across all of its internal
+ * retries. Distinct from a generic Error so getTodaysProducts() can catch
+ * it specifically and wait-and-resume rather than aborting the whole run.
+ */
+class RateLimitExceededError extends Error {
+  constructor(message, resetInSeconds) {
+    super(message);
+    this.name = 'RateLimitExceededError';
+    this.resetInSeconds = resetInSeconds;
+  }
+}
 
 // GraphQL query for a single page of posts, filtered to a date window and
 // ordered newest-first. `after` is the pagination cursor from the previous
@@ -174,6 +197,33 @@ function extractRateLimitInfo(response) {
 }
 
 /**
+ * Best-effort extraction of the `reset_in` seconds value from a 429
+ * response body — PH documents this as the number of seconds until quota
+ * resets. Checks both a top-level `reset_in` and a nested
+ * `errors[].extensions.reset_in`, since PH's error shape for this isn't
+ * consistently documented. Returns null (never throws) if it can't be
+ * found, so callers can fall back to a safe default.
+ */
+async function extractResetInSeconds(response) {
+  try {
+    const body = await response.clone().json();
+    if (body && typeof body.reset_in === 'number') {
+      return body.reset_in;
+    }
+    if (body && Array.isArray(body.errors)) {
+      for (const err of body.errors) {
+        if (err && err.extensions && typeof err.extensions.reset_in === 'number') {
+          return err.extensions.reset_in;
+        }
+      }
+    }
+  } catch (_parseError) {
+    // Body wasn't JSON, or didn't have the field — fall through to null.
+  }
+  return null;
+}
+
+/**
  * Executes a single GraphQL request against the PH API with retry handling.
  * Retries on rate limiting (429) and transient server errors (5xx) and on
  * network-level failures (e.g. fetch throwing). Anything else — bad auth,
@@ -214,17 +264,37 @@ async function graphqlRequest(query, variables) {
       continue;
     }
 
-    // Retry on rate limiting or transient server errors.
-    if (response.status === 429 || response.status >= 500) {
+    // Rate limiting: retry a few short/transient 429s with backoff (spaced
+    // out, never hammered back-to-back), but if it persists past
+    // MAX_RETRIES, treat it as a real quota exhaustion rather than a fluke —
+    // surface it as a typed error so the caller can wait out PH's actual
+    // reset window and resume, instead of us guessing with more backoff.
+    if (response.status === 429) {
+      if (attempt > MAX_RETRIES) {
+        const resetInSeconds = (await extractResetInSeconds(response)) ?? RATE_LIMIT_FALLBACK_RESET_SECONDS;
+        throw new RateLimitExceededError(
+          `Product Hunt API rate limit exceeded after ${MAX_RETRIES} retries`,
+          resetInSeconds
+        );
+      }
+      const retryAfterHeader = response.headers.get('retry-after');
+      const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : null;
+      const delay = retryAfterMs || BASE_BACKOFF_MS * 2 ** (attempt - 1);
+      await sleep(delay);
+      continue;
+    }
+
+    // Transient server errors: same bounded exponential backoff, but these
+    // are unrelated to quota so a generic failure after MAX_RETRIES is
+    // still correct here.
+    if (response.status >= 500) {
       if (attempt > MAX_RETRIES) {
         const body = await response.text().catch(() => '');
         throw new Error(
           `Product Hunt API request failed after ${MAX_RETRIES} retries (HTTP ${response.status}): ${body}`
         );
       }
-      const retryAfterHeader = response.headers.get('retry-after');
-      const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : null;
-      const delay = retryAfterMs || BASE_BACKOFF_MS * 2 ** (attempt - 1);
+      const delay = BASE_BACKOFF_MS * 2 ** (attempt - 1);
       await sleep(delay);
       continue;
     }
@@ -302,12 +372,32 @@ async function getTodaysProducts() {
       break;
     }
 
-    const { data, rateLimit } = await graphqlRequest(POSTS_QUERY, {
-      postedAfter,
-      postedBefore,
-      first: PAGE_SIZE,
-      after,
-    });
+    // Retry the *same* page (same cursor) across rate-limit waits — a
+    // persistent 429 here means quota is genuinely exhausted, not that this
+    // page's request was malformed, so we wait out PH's reported reset
+    // window and resume rather than giving up with partial results.
+    let data;
+    let rateLimit;
+    while (true) {
+      try {
+        ({ data, rateLimit } = await graphqlRequest(POSTS_QUERY, {
+          postedAfter,
+          postedBefore,
+          first: PAGE_SIZE,
+          after,
+        }));
+        break;
+      } catch (error) {
+        if (!(error instanceof RateLimitExceededError)) {
+          throw error;
+        }
+        const waitSeconds = error.resetInSeconds + RATE_LIMIT_WAIT_BUFFER_SECONDS;
+        console.warn(
+          `[productHuntService] Rate limit hit on page ${page} — waiting ${waitSeconds}s for quota reset, then resuming.`
+        );
+        await sleep(waitSeconds * 1000);
+      }
+    }
     totalRequests += 1;
 
     const posts = data && data.posts;
@@ -345,6 +435,14 @@ async function getTodaysProducts() {
 
     hasNextPage = posts.pageInfo.hasNextPage;
     after = posts.pageInfo.endCursor;
+
+    // Deliberate throttle between pages — PH's quota appears to replenish
+    // gradually rather than only at a fixed window boundary, so pacing
+    // requests below full speed keeps a multi-page run sustainable instead
+    // of cliff-diving into the rate limit.
+    if (hasNextPage && PRODUCT_HUNT_PAGE_DELAY_MS > 0) {
+      await sleep(PRODUCT_HUNT_PAGE_DELAY_MS);
+    }
   }
 
   return products;

@@ -12,6 +12,11 @@ const env = {
   // metric, server ignoring a filter, etc.) from silently burning the
   // entire rate limit again.
   PRODUCT_HUNT_MAX_PAGES: Number(process.env.PRODUCT_HUNT_MAX_PAGES) || 100,
+  // Fixed delay between successive page requests. PH's rate limit quota
+  // appears to replenish gradually over time rather than only resetting at
+  // a fixed 15-min window boundary, so pacing requests below full speed
+  // keeps a multi-page run from cliff-diving into a 429.
+  PRODUCT_HUNT_PAGE_DELAY_MS: Number(process.env.PRODUCT_HUNT_PAGE_DELAY_MS) || 3000,
 };
 
 module.exports = env;
