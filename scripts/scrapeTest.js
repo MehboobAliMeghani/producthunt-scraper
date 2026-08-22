@@ -1,19 +1,30 @@
 /**
- * CLI runner for getTodaysProducts() (+ optional redirect resolution), for
- * testing the scraper without spinning up the Express server.
+ * CLI runner for getTodaysProducts() (+ optional redirect resolution +
+ * optional email scraping + optional email filtering), for testing the
+ * scraper without spinning up the Express server.
  *
  * Usage:
- *   npm run scrape:test                        # fetch only
- *   npm run scrape:test -- --resolve           # fetch, then resolve redirect links (full batch)
- *   npm run scrape:test -- --resolve --limit=5 # resolve only the first N products —
- *                                               # use this to sanity-check against a
- *                                               # handful of real PH redirect links
- *                                               # before running the full batch
+ *   npm run scrape:test                                   # fetch only
+ *   npm run scrape:test -- --resolve                       # fetch, then resolve redirect links (full batch)
+ *   npm run scrape:test -- --resolve --limit=5              # resolve only the first N products —
+ *                                                            # use this to sanity-check against a
+ *                                                            # handful of real PH redirect links
+ *                                                            # before running the full batch
+ *   npm run scrape:test -- --resolve --emails               # fetch, resolve, then scrape emails via Apify
+ *                                                            # (requires APIFY_API_TOKEN; --emails is a no-op
+ *                                                            # without --resolve, since it needs resolvedWebsite)
+ *   npm run scrape:test -- --resolve --emails --filter       # ...then curate the scraped emails down to
+ *                                                            # a final selection (--filter is a no-op
+ *                                                            # without --emails, since it needs raw emails)
  */
 const { getTodaysProducts } = require('../src/services/productHuntService');
 const { resolveRedirects } = require('../src/services/redirectResolverService');
+const { scrapeEmails } = require('../src/services/emailScraperService');
+const { filterEmails } = require('../src/services/emailFilterService');
 
 const shouldResolve = process.argv.includes('--resolve');
+const shouldScrapeEmails = process.argv.includes('--emails');
+const shouldFilterEmails = process.argv.includes('--filter');
 const limitArg = process.argv.find((arg) => arg.startsWith('--limit='));
 const limit = limitArg ? Number(limitArg.split('=')[1]) : null;
 
@@ -53,6 +64,42 @@ const limit = limitArg ? Number(limitArg.split('=')[1]) : null;
     console.log(`  Resolved:        ${resolvedCount}`);
     console.log(`  Failed:          ${failedCount}`);
     console.log(`  Time taken:      ${(elapsedMs / 1000).toFixed(1)}s`);
+
+    if (!shouldScrapeEmails) {
+      return;
+    }
+
+    console.log('\nScraping contact emails for resolved websites via Apify...\n');
+    const emailsStartedAt = Date.now();
+    const { products: withEmails, summary } = await scrapeEmails(resolved);
+    const emailsElapsedMs = Date.now() - emailsStartedAt;
+
+    console.log('\n' + JSON.stringify(withEmails, null, 2));
+    console.log('\nEmail scraping summary:');
+    console.log(`  Sent to Apify:     ${summary.totalSentToApify}`);
+    console.log(`  Matched:           ${summary.matched}`);
+    console.log(`  No emails found:   ${summary.noEmailsFound}`);
+    console.log(`  Skipped:           ${summary.skipped}`);
+    console.log(`  Apify run status:  ${summary.apifyRunStatus}`);
+    console.log(`  Time taken:        ${(emailsElapsedMs / 1000).toFixed(1)}s`);
+
+    if (!shouldFilterEmails) {
+      return;
+    }
+
+    console.log('\nFiltering scraped emails down to a final curated selection...\n');
+    const { products: filtered, summary: filterSummary } = filterEmails(withEmails);
+
+    console.log('\n' + JSON.stringify(filtered, null, 2));
+    console.log('\nEmail filtering summary:');
+    console.log(`  Products with raw emails:  ${filterSummary.totalProductsWithRawEmails}`);
+    console.log(`  Products after filtering:  ${filterSummary.totalAfterFiltering}`);
+    console.log(`  Emails kept:               ${filterSummary.totalEmailsKept}`);
+    console.log(`  Emails removed:            ${filterSummary.totalEmailsRemoved}`);
+    console.log(`    malformed:      ${filterSummary.removedByReason.malformed}`);
+    console.log(`    placeholder:    ${filterSummary.removedByReason.placeholder}`);
+    console.log(`    role_address:   ${filterSummary.removedByReason.role_address}`);
+    console.log(`    exceeded_cap:   ${filterSummary.removedByReason.exceeded_cap}`);
   } catch (error) {
     console.error('scrape:test failed:', error.message);
     process.exitCode = 1;

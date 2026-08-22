@@ -17,6 +17,9 @@ const env = {
   // a fixed 15-min window boundary, so pacing requests below full speed
   // keeps a multi-page run from cliff-diving into a 429.
   PRODUCT_HUNT_PAGE_DELAY_MS: Number(process.env.PRODUCT_HUNT_PAGE_DELAY_MS) || 3000,
+  APIFY_API_TOKEN: process.env.APIFY_API_TOKEN || '',
+  // How often emailScraperService polls an in-progress Apify actor run.
+  APIFY_POLL_INTERVAL_MS: Number(process.env.APIFY_POLL_INTERVAL_MS) || 20000,
 };
 
 module.exports = env;
