@@ -2,7 +2,7 @@
  * emailScraperService.js
  *
  * Takes the array of products produced by productHuntService +
- * redirectResolverService (each with a resolvedWebsite / resolutionStatus)
+ * websiteDiscoveryService (each with a resolvedWebsite / resolutionStatus)
  * and runs the resolved websites through an Apify contact-scraper actor to
  * find contact emails, then attaches the results back onto each product.
  *

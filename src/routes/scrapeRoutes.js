@@ -1,6 +1,6 @@
 const express = require('express');
 const { getTodaysProducts } = require('../services/productHuntService');
-const { resolveRedirects } = require('../services/redirectResolverService');
+const { discoverWebsites } = require('../services/websiteDiscoveryService');
 const { scrapeEmails } = require('../services/emailScraperService');
 const { filterEmails } = require('../services/emailFilterService');
 
@@ -10,7 +10,7 @@ const router = express.Router();
  * GET /api/scrape/preview
  *
  * Temporary manual-testing endpoint — calls getTodaysProducts(), then
- * resolveRedirects() on the results, and returns the combined JSON array.
+ * discoverWebsites() on the results, and returns the combined JSON array.
  * Not the final API shape; just here to verify the pipeline works
  * end-to-end before later stages (Sheets export, etc.) are chained on.
  *
@@ -24,7 +24,7 @@ const router = express.Router();
 router.get('/preview', async (req, res) => {
   try {
     const products = await getTodaysProducts();
-    const resolved = await resolveRedirects(products);
+    const resolved = await discoverWebsites(products);
 
     if (req.query.emails !== 'true') {
       res.json(resolved);

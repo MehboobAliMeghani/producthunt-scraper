@@ -1,14 +1,20 @@
 /**
- * CLI runner for getTodaysProducts() (+ optional redirect resolution +
+ * CLI runner for getTodaysProducts() (+ optional website discovery +
  * optional email scraping + optional email filtering), for testing the
  * scraper without spinning up the Express server.
  *
+ * Website discovery uses a real headless Chromium browser (via Playwright)
+ * to load each product's Product Hunt page and extract its outbound
+ * website link — this requires the Chromium browser binary to be installed
+ * locally (`npx playwright install --with-deps chromium`), not just the
+ * `playwright` npm package. See README for details.
+ *
  * Usage:
  *   npm run scrape:test                                   # fetch only
- *   npm run scrape:test -- --resolve                       # fetch, then resolve redirect links (full batch)
- *   npm run scrape:test -- --resolve --limit=5              # resolve only the first N products —
+ *   npm run scrape:test -- --resolve                       # fetch, then discover outbound websites (full batch)
+ *   npm run scrape:test -- --resolve --limit=5              # discover only the first N products —
  *                                                            # use this to sanity-check against a
- *                                                            # handful of real PH redirect links
+ *                                                            # handful of real PH product pages
  *                                                            # before running the full batch
  *   npm run scrape:test -- --resolve --emails               # fetch, resolve, then scrape emails via Apify
  *                                                            # (requires APIFY_API_TOKEN; --emails is a no-op
@@ -18,7 +24,7 @@
  *                                                            # without --emails, since it needs raw emails)
  */
 const { getTodaysProducts } = require('../src/services/productHuntService');
-const { resolveRedirects } = require('../src/services/redirectResolverService');
+const { discoverWebsites } = require('../src/services/websiteDiscoveryService');
 const { scrapeEmails } = require('../src/services/emailScraperService');
 const { filterEmails } = require('../src/services/emailFilterService');
 
@@ -50,16 +56,16 @@ const limit = limitArg ? Number(limitArg.split('=')[1]) : null;
       console.log(`\n--limit=${limit} passed — only resolving the first ${productsToResolve.length} product(s).`);
     }
 
-    console.log('\nResolving redirect links to their final destination URLs...\n');
+    console.log('\nDiscovering outbound websites from Product Hunt product pages...\n');
     const startedAt = Date.now();
-    const resolved = await resolveRedirects(productsToResolve);
+    const resolved = await discoverWebsites(productsToResolve);
     const elapsedMs = Date.now() - startedAt;
 
     const resolvedCount = resolved.filter((p) => p.resolutionStatus === 'resolved').length;
     const failedCount = resolved.filter((p) => p.resolutionStatus === 'failed').length;
 
     console.log('\n' + JSON.stringify(resolved, null, 2));
-    console.log('\nRedirect resolution summary:');
+    console.log('\nWebsite discovery summary:');
     console.log(`  Total products:  ${resolved.length}`);
     console.log(`  Resolved:        ${resolvedCount}`);
     console.log(`  Failed:          ${failedCount}`);

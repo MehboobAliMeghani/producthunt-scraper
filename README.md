@@ -19,7 +19,8 @@ on top of it.
 │   ├── routes/
 │   │   └── scrapeRoutes.js       # GET /api/scrape/preview
 │   ├── services/
-│   │   └── productHuntService.js # PH GraphQL client — getTodaysProducts()
+│   │   ├── productHuntService.js       # PH GraphQL client — getTodaysProducts()
+│   │   └── websiteDiscoveryService.js  # Playwright-driven outbound website discovery
 │   └── jobs/                     # (empty — for future scheduled jobs)
 ├── .env.example
 └── package.json
@@ -31,6 +32,22 @@ on top of it.
 npm install
 cp .env.example .env   # then fill in PRODUCT_HUNT_API_TOKEN
 ```
+
+### Playwright browser binaries
+
+Website discovery (`websiteDiscoveryService.js`) drives a real headless
+Chromium browser via [Playwright](https://playwright.dev) to load each
+product's Product Hunt page. `npm install` only installs the `playwright`
+npm package — it does **not** download the actual browser binary. Run this
+once after `npm install`, both locally and as part of the build step on
+Render (or any deploy target):
+
+```bash
+npx playwright install --with-deps chromium
+```
+
+Without this step, `discoverWebsites()` will fail immediately since Chromium
+has nothing to launch.
 
 ### Getting a Product Hunt API token
 
